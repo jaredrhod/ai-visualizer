@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<!--
+ai-visualizer: give your AI agent a face.
+Copyright (C) 2026 Jared Rhodenizer
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cognitive Command</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#01060b;cursor:none}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+</style>
+</head>
+<body>
+<canvas id="stage" role="img" aria-label="Alfred Cognitive Command interface"></canvas>
+<script src="../../core.js"></script>
+<script>
+"use strict";
+const Q=new URLSearchParams(location.search);
+const SHOT=Q.get("shot");
+AV.init({mic:true});
+AV.ready(a=>{document.title=a.name+" Cognitive Command";});
+
+const U=AV.util;
+const CYAN=[80,205,255],PALE=[190,238,255],AMBER=[239,182,94],RED=[255,58,68];
+const PROFILE={
+  idle:{traffic:1.8,drift:.22,scan:.18},
+  listening:{traffic:4.0,drift:.16,scan:.32},
+  thinking:{traffic:12.0,drift:.58,scan:1.0},
+  speaking:{traffic:8.0,drift:.40,scan:.62},
+};
+const FORCE_ALERT=Q.get("alert")==="1";
+const TAU=Math.PI*2;
+const cv=document.getElementById("stage"),ctx=cv.getContext("2d");
+const field=document.createElement("canvas"),fg=field.getContext("2d");
+let W=0,H=0,DPR=1,now=0,fps=0,fpsCount=0,fpsAt=0;
+let rng=mulberry32(41),mesh={nodes:[],edges:[],pulses:[]},spawnCarry=0;
+let thinkMix=0,speakMix=0,stateAge=0,previousState="idle";
+let micHistory=Array(72).fill(0);
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function rgba(c,a){return`rgba(${c[0]},${c[1]},${c[2]},${Math.max(0,Math.min(1,a))})`}
+function easeMix(value,target,dt){return value+(target-value)*(1-Math.exp(-dt/280))}
+
+function buildMesh(){
+  rng=mulberry32(41);
+  const nodes=Array.from({length:96},()=>{
+    const a=rng()*TAU,r=Math.sqrt(rng());
+    return{x:Math.cos(a)*r,y:Math.sin(a)*r*.68,z:(rng()-.5)*.9,
+      phase:rng()*TAU,size:1+rng()*1.6};
+  });
+  const edges=[],seen=new Set();
+  // ponytail: O(n²) runs only on resize; add a spatial index only if profiling needs it.
+  nodes.forEach((n,i)=>{
+    nodes.map((m,j)=>({j,d:j===i?Infinity:Math.hypot(n.x-m.x,n.y-m.y,n.z-m.z)}))
+      .sort((a,b)=>a.d-b.d).slice(0,3).forEach(({j})=>{
+        const a=Math.min(i,j),b=Math.max(i,j),key=`${a}:${b}`;
+        if(!seen.has(key)){seen.add(key);edges.push({a,b})}
+      });
+  });
+  mesh={nodes,edges,pulses:[]};spawnCarry=0;
+}
+
+function pulseDirection(edge,state){
+  const a=mesh.nodes[edge.a],b=mesh.nodes[edge.b];
+  const ra=Math.hypot(a.x,a.y,a.z),rb=Math.hypot(b.x,b.y,b.z);
+  if(state==="listening")return ra>rb?1:-1;
+  if(state==="speaking")return ra<rb?1:-1;
+  return rng()<.5?1:-1;
+}
+
+function updateSignals(dt,state){
+  const profile=PROFILE[state]||PROFILE.idle;
+  spawnCarry+=profile.traffic*dt/1000;
+  while(spawnCarry>=1&&mesh.pulses.length<72){
+    spawnCarry--;
+    const edge=rng()*mesh.edges.length|0;
+    mesh.pulses.push({edge,t:0,speed:.30+rng()*.32,
+      dir:pulseDirection(mesh.edges[edge],state)});
+  }
+  for(const pulse of mesh.pulses)pulse.t+=pulse.speed*dt/1000;
+  mesh.pulses=mesh.pulses.filter(pulse=>pulse.t<1);
+}
+
+function projectNode(n,t){
+  const profile=PROFILE[AV.state]||PROFILE.idle;
+  const yaw=Math.sin(t*.18)*.22+thinkMix*.12,cy=Math.cos(yaw),sy=Math.sin(yaw);
+  const pitch=Math.sin(t*.13+1.2)*.08,cp=Math.cos(pitch),sp=Math.sin(pitch);
+  const breathe=1+.015*Math.sin(t*.7+n.phase)+profile.drift*.018;
+  const nx=n.x*breathe,ny=n.y*breathe,nz=n.z;
+  const x=nx*cy+nz*sy,z=-nx*sy+nz*cy;
+  const y=ny*cp-z*sp,z2=ny*sp+z*cp;
+  const perspective=2.7/(2.7+z2),scale=Math.min(W,H)*.39;
+  return{x:W/2+x*scale*perspective,y:H*.49+y*scale*perspective,z:z2,perspective};
+}
+
+function drawBackground(t){
+  const alert=FORCE_ALERT||AV.alert,col=alert?RED:CYAN;
+  const g=ctx.createRadialGradient(W/2,H*.48,0,W/2,H*.48,Math.max(W,H)*.72);
+  g.addColorStop(0,alert?"#21060a":"#071d2b");
+  g.addColorStop(.5,"#020a11");g.addColorStop(1,"#010306");
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+
+  ctx.strokeStyle=rgba(col,.08);ctx.lineWidth=1;
+  for(let i=0;i<12;i++){
+    const y=H*.58+i*i*H*.0036;
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();
+  }
+  for(let i=-10;i<=10;i++){
+    ctx.beginPath();ctx.moveTo(W/2,H*.56);ctx.lineTo(W/2+i*W*.09,H);ctx.stroke();
+  }
+
+  const profile=PROFILE[AV.state]||PROFILE.idle;
+  const scan=(t*40*(.2+profile.scan))%(W+240)-120;
+  ctx.fillStyle=rgba(col,.035);ctx.fillRect(scan,0,80,H);
+
+  const radius=Math.min(W,H)*.31;
+  ctx.strokeStyle=rgba(col,.14);ctx.lineWidth=1;
+  ctx.setLineDash([3,9]);
+  ctx.beginPath();ctx.arc(W/2,H*.49,radius,0,TAU);ctx.stroke();
+  ctx.beginPath();ctx.arc(W/2,H*.49,radius*1.13,t*.08,t*.08+Math.PI*1.38);ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawMesh(t){
+  fg.clearRect(0,0,W,H);
+  const alert=FORCE_ALERT||AV.alert,col=alert?RED:CYAN;
+  const projected=mesh.nodes.map(node=>projectNode(node,t));
+  fg.globalCompositeOperation="lighter";fg.lineWidth=1;
+
+  for(const edge of mesh.edges){
+    const a=projected[edge.a],b=projected[edge.b];
+    const depth=(a.perspective+b.perspective)*.5;
+    fg.strokeStyle=rgba(col,(.08+.14*thinkMix)*depth);
+    fg.beginPath();fg.moveTo(a.x,a.y);fg.lineTo(b.x,b.y);fg.stroke();
+  }
+  for(let i=0;i<projected.length;i++){
+    const p=projected[i],node=mesh.nodes[i];
+    const twinkle=.55+.45*Math.sin(t*1.2+node.phase)**2;
+    const r=node.size*p.perspective*(1+AV.env*.7*speakMix);
+    fg.fillStyle=rgba(col,(.28+.48*twinkle)*p.perspective);
+    fg.beginPath();fg.arc(p.x,p.y,r,0,TAU);fg.fill();
+  }
+  for(const pulse of mesh.pulses){
+    const edge=mesh.edges[pulse.edge],a=projected[edge.a],b=projected[edge.b];
+    const q=pulse.dir>0?pulse.t:1-pulse.t;
+    const x=a.x+(b.x-a.x)*q,y=a.y+(b.y-a.y)*q;
+    fg.fillStyle=rgba(alert?RED:(AV.state==="listening"?AMBER:PALE),1);
+    fg.beginPath();fg.arc(x,y,2.5+2*thinkMix,0,TAU);fg.fill();
+  }
+  fg.globalCompositeOperation="source-over";
+  U.bloomBlit(ctx,field,W,H);
+}
+
+function drawCorner(x,y,dx,dy,col){
+  ctx.strokeStyle=rgba(col,.65);ctx.lineWidth=1.5;ctx.beginPath();
+  ctx.moveTo(x,y+22*dy);ctx.lineTo(x,y);ctx.lineTo(x+22*dx,y);ctx.stroke();
+}
+
+function drawPanel(x,y,title,rows,right=false){
+  const width=W<1000?150:180;
+  ctx.textAlign=right?"right":"left";ctx.textBaseline="top";
+  ctx.font="11px Consolas,monospace";ctx.fillStyle=rgba(PALE,.9);ctx.fillText(title,x,y);
+  ctx.strokeStyle=rgba(CYAN,.3);ctx.beginPath();
+  ctx.moveTo(right?x-width:x,y+18);ctx.lineTo(right?x:x+width,y+18);ctx.stroke();
+  rows.forEach((row,i)=>{
+    const yy=y+29+i*20,value=String(row[1]);
+    ctx.fillStyle=rgba(CYAN,.52);ctx.fillText(row[0],x,yy);
+    ctx.fillStyle=row[2]?rgba(row[2],.95):rgba(PALE,.82);
+    if(right){ctx.fillText(value,x-width,yy)}
+    else{ctx.textAlign="right";ctx.fillText(value,x+width,yy);ctx.textAlign="left"}
+  });
+  ctx.textAlign="left";
+}
+
+function drawChrome(state){
+  const alert=FORCE_ALERT||AV.alert,col=alert?RED:CYAN;
+  const pct=value=>`${Math.round(Math.max(0,Math.min(1,value))*100)}%`;
+  const energy=AV.samples.reduce((sum,value)=>sum+Math.abs(value),0)/AV.samples.length;
+  let left=[
+    ["STATE",state.toUpperCase(),state==="listening"?AMBER:CYAN],
+    ["STATE AGE",`${(stateAge/1000).toFixed(1)}s`],
+    ["MIC LEVEL",pct(AV.micLevel),state==="listening"?AMBER:CYAN],
+    ["VOICE ENV",pct(AV.env)],
+    ["WAVE ENERGY",pct(energy)],
+    ["FRAME RATE",`${fps} FPS`],
+  ];
+  let right=[
+    ["LOCAL TIME",new Date().toLocaleTimeString([], {hour12:false})],
+    ["VIEWPORT",`${W}×${H}`],
+    ["MEMORY","—"],
+    ["BUS HEALTH","—"],
+  ];
+  for(const row of AV.util.usageRows())right.push([row.label,row.text,row.hot?RED:AMBER]);
+  if(W<1000){left=left.slice(0,4);right=right.slice(0,4)}
+
+  ctx.strokeStyle=rgba(col,.22);ctx.lineWidth=1;ctx.strokeRect(12,12,W-24,H-24);
+  drawCorner(14,14,1,1,col);drawCorner(W-14,14,-1,1,col);
+  drawCorner(14,H-14,1,-1,col);drawCorner(W-14,H-14,-1,-1,col);
+
+  ctx.textBaseline="top";ctx.font="bold 15px Consolas,monospace";
+  ctx.fillStyle=rgba(PALE,.95);ctx.fillText(AV.label,28,24);
+  if(AV.badge){ctx.textAlign="right";ctx.fillText(AV.badge,W-28,24);ctx.textAlign="left"}
+
+  ctx.textAlign="center";ctx.font="bold 13px Consolas,monospace";
+  ctx.fillStyle=state==="listening"?rgba(AMBER,1):rgba(col,.95);
+  ctx.fillText(`${alert?"ALERT // ":""}${state.toUpperCase()}`,W/2,24);
+  if(W>=760){
+    ctx.font="10px Consolas,monospace";ctx.fillStyle=rgba(CYAN,.55);
+    ctx.textAlign="left";ctx.fillText("COGNITIVE COMMAND // LOCAL VISUAL INTERFACE",28,45);
+    ctx.textAlign="center";ctx.fillStyle=rgba(CYAN,.5);
+    ctx.fillText("96 NODES // LIVE ROUTING",W/2,44);
+  }
+  ctx.textAlign="left";
+
+  if(W>=760){
+    drawPanel(28,84,"INPUT / COGNITION",left);
+    drawPanel(W-28,84,"SYSTEM / SESSION",right,true);
+  }
+}
+
+function drawTrace(values,y,height,color){
+  ctx.strokeStyle=rgba(color,.9);ctx.lineWidth=1.4;ctx.beginPath();
+  values.forEach((value,i)=>{
+    const x=28+i*(W-56)/Math.max(1,values.length-1),yy=y-value*height;
+    if(i)ctx.lineTo(x,yy);else ctx.moveTo(x,yy);
+  });
+  ctx.stroke();
+}
+
+function drawWaveforms(state){
+  micHistory.push(AV.micLevel);micHistory=micHistory.slice(-72);
+  ctx.font="9px Consolas,monospace";ctx.textBaseline="alphabetic";
+  ctx.fillStyle=rgba(state==="speaking"?PALE:CYAN,.65);ctx.fillText("VOICE OUT",28,H-79);
+  ctx.fillStyle=rgba(state==="listening"?AMBER:CYAN,.65);ctx.fillText("MIC IN",28,H-43);
+  ctx.strokeStyle=rgba(CYAN,.12);ctx.beginPath();ctx.moveTo(28,H-68);ctx.lineTo(W-28,H-68);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(28,H-32);ctx.lineTo(W-28,H-32);ctx.stroke();
+  drawTrace(Array.from(AV.samples),H-68,25,state==="speaking"?PALE:CYAN);
+  drawTrace(micHistory,H-32,22,state==="listening"?AMBER:CYAN);
+}
+
+function drawAlertFrame(){
+  const a=.45+.35*Math.sin(now/180)**2;ctx.fillStyle=rgba(RED,a);
+  ctx.fillRect(0,0,W,6);ctx.fillRect(0,H-6,W,6);
+  ctx.fillRect(0,0,6,H);ctx.fillRect(W-6,0,6,H);
+}
+
+function resize(){
+  DPR=Math.min(2,devicePixelRatio||1);W=innerWidth;H=innerHeight;
+  cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
+  cv.style.width=W+"px";cv.style.height=H+"px";
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  field.width=W;field.height=H;
+  buildMesh();
+}
+
+function frame(dt){
+  AV.tick(dt);now+=dt;fpsCount++;
+  const state=AV.state in PROFILE?AV.state:"idle";
+  if(state!==previousState){previousState=state;stateAge=0}else stateAge+=dt;
+  thinkMix=easeMix(thinkMix,state==="thinking"?1:0,dt);
+  speakMix=easeMix(speakMix,state==="speaking"?1:0,dt);
+  if(now-fpsAt>=1000){fps=fpsCount;fpsCount=0;fpsAt=now}
+  updateSignals(dt,state);
+  drawBackground(now/1000);
+  drawMesh(now/1000);
+  drawChrome(state);
+  drawWaveforms(state);
+  if(FORCE_ALERT||AV.alert)drawAlertFrame();
+}
+
+addEventListener("resize",resize);resize();
+addEventListener("keydown",e=>{
+  if(e.key==="f"||e.key==="F"){
+    document.fullscreenElement?document.exitFullscreen()
+      :document.documentElement.requestFullscreen();
+  }
+});
+if(SHOT){AV.shotRun(frame)}else{
+  let last=performance.now();
+  (function loop(ts){const dt=Math.min(100,ts-last);last=ts;frame(dt);requestAnimationFrame(loop)})(last);
+}
+</script>
+</body>
+</html>

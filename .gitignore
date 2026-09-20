@@ -7,3 +7,4 @@ __pycache__/
 .voice_alert
 # your personal config, created at setup: never tracked, never touched by updates
 ai-visualizer.json
+.worktrees/
