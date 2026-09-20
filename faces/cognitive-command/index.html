@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<!--
+ai-visualizer: give your AI agent a face.
+Copyright (C) 2026 Jared Rhodenizer
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cognitive Command</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#01060b;cursor:none}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+</style>
+</head>
+<body>
+<canvas id="stage" role="img" aria-label="Alfred Cognitive Command interface"></canvas>
+<script src="../../core.js"></script>
+<script>
+"use strict";
+const Q=new URLSearchParams(location.search);
+const SHOT=Q.get("shot");
+AV.init({mic:true});
+AV.ready(a=>{document.title=a.name+" Cognitive Command";});
+const cv=document.getElementById("stage"),ctx=cv.getContext("2d");
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR=Math.min(2,devicePixelRatio||1);
+  W=innerWidth;H=innerHeight;
+  cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+function frame(dt){
+  AV.tick(dt);
+  ctx.fillStyle="#01060b";ctx.fillRect(0,0,W,H);
+}
+addEventListener("resize",resize);resize();
+addEventListener("keydown",e=>{
+  if(e.key==="f"||e.key==="F"){
+    document.fullscreenElement?document.exitFullscreen()
+      :document.documentElement.requestFullscreen();
+  }
+});
+if(SHOT){AV.shotRun(frame)}else{
+  let last=performance.now();
+  (function loop(ts){const dt=Math.min(100,ts-last);last=ts;frame(dt);requestAnimationFrame(loop)})(last);
+}
+</script>
+</body>
+</html>
