@@ -56,6 +56,7 @@ Ctrl-C stops.
 import json
 import math
 import mimetypes
+import os
 import sys
 import threading
 import time
@@ -249,6 +250,27 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _open_browser_quietly(url):
+    # webbrowser.open() launches the browser as a child process that
+    # inherits our stdout/stderr, so every console line the browser itself
+    # prints (GPU driver probes, dbus warnings, etc.) lands in this
+    # terminal looking like the agent is erroring out. None of it is ours;
+    # muting fd 1/2 for just the instant the browser process is spawned
+    # keeps the browser's own chatter out without touching our own prints.
+    devnull = os.open(os.devnull, os.O_RDWR)
+    saved_stdout, saved_stderr = os.dup(1), os.dup(2)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        webbrowser.open(url)
+    finally:
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+        os.close(devnull)
+
+
 if __name__ == "__main__":
     mode = f"MOCK={MOCK}" if MOCK else f"bus: {BUS}"
     root = f"http://127.0.0.1:{PORT}/"
@@ -278,7 +300,7 @@ if __name__ == "__main__":
         if mine:
             print(f"already running at {root}  opening it instead", flush=True)
             if not NO_OPEN:
-                webbrowser.open(url)
+                _open_browser_quietly(url)
             sys.exit(0)
         print(f"port {PORT} is taken by something that is not this server.",
               flush=True)
@@ -288,7 +310,7 @@ if __name__ == "__main__":
     srv.allow_reuse_address = True
     print(f"ai-visualizer on {root}  opening {url}  ({mode})  Ctrl-C stops", flush=True)
     if not NO_OPEN:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.6, lambda: _open_browser_quietly(url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
